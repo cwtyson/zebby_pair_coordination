@@ -2,14 +2,21 @@
 .Rhistory
 .Rapp.history
 
+## Ignore files in misc folder
+/misc/
+
+## Ignore files in data folder
+/data/
+
+## Ignore files in output folder
+/output/
+
 # Session Data files
 .RData
 .RDataTmp
 
 # User-specific files
 .Ruserdata
-
-google_key.R
 
 # Example code in package build process
 *-Ex.R
