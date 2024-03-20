@@ -15,10 +15,12 @@ library(mgcv)
 library(sf)
 library(spatsoc)
 
-fg_map <- readRDS("/Users/tyson/Documents/git/zebby_movement_analysis/plots/fg_map.RDS")
+# ## Read in map
+# fg_map <- readRDS("./data/fg_map.RDS")
 
-source("google_key.R")
-ggmap::register_google(key = google_key)  
+# ## Need to supply an Google map API key to create the maps
+# source("google_key.R")
+# ggmap::register_google(key = google_key)  
   
 ## Summarize detections #########
 
@@ -80,32 +82,195 @@ b_tags <- tags[tags$section == "B",]$tag
 d_tags <- tags[tags$section == "D",]$tag
 e_tags <- tags[tags$section == "E",]$tag
 
-
 ##.Color
 set.seed(4)
 group_col <- tags %>% 
   distinct(section) %>% 
   mutate(color = wesanderson::wes_palette("Zissou1", 100, type = "continuous")[seq(1, 100, length.out = 3)])
 
-sections <- tags %>% 
-  left_join(group_col) %>% 
-  arrange(section) 
+##  Distance between pairs and ridge plots of distance between pairs and neighbors #####
 
-section_color = sections %>% 
-  pull(color)
+## Read in tag log
+tags_p <- readr::read_csv("./data/tag_data.csv", show_col_types = FALSE)
 
-section_order <- sections %>% 
-  pull(tag)
+## Get tracks
+tracks <- readRDS("./data/detections/pair_detections.RDS")
 
-## AKDEs
-pair_akdes <- readRDS("./data/akdes.RDS")
+## Combine
+tracks_df <- lapply(tracks, function(x) x %>%
+                      data.frame(tag = gsub("tag_","", x@info$identity))) %>%
+  do.call(rbind, .) %>%
+  data.frame() %>%
+  sf::st_as_sf(coords = c("longitude", "latitude"), crs = 4326) %>%
+  sf::st_transform(32754) %>% 
+  dplyr::select(tag,dt=timestamp) %>% 
+  dplyr::arrange(dt) %>% 
+  mutate(x = as.matrix((sf::st_coordinates(.data$geometry)), ncol = 2)[,1],
+         y = as.matrix((sf::st_coordinates(.data$geometry)), ncol = 2)[,2]) %>% 
+  sf::st_drop_geometry()
 
-## Sort
-pair_akdes_sort <- pair_akdes[section_order]
+## Add group information
+pair_tracks <- tracks_df %>%
+  left_join(tags_p) %>%
+  na.omit() %>%
+  ungroup() %>%
+  select(x,
+         y,
+         dt,
+         tag,
+         group,
+         section,
+         sex) %>%
+  arrange(tag,
+          dt) %>%
+  data.frame()
 
-## Plot
-all_mean <- meta(pair_akdes, col = section_color)
+## Convert to dt
+tracks_dt <- data.table::setDT(pair_tracks)
 
+## Group times - simultaneous fixes
+group_times(tracks_dt, 
+            datetime = 'dt')
+
+## Get distance between simultaneous fixes for pairs
+pair_distances_dt <- edge_dist(tracks_dt,
+                               threshold = 2000,
+                               id = "tag",
+                               timegroup = "timegroup",
+                               coords = c("x","y"),
+                               fillNA = FALSE,
+                               returnDist = TRUE,
+                               splitBy = c("group"))
+
+## Rearrange IDs
+dyad_id(pair_distances_dt, id1 = 'ID1', id2 = 'ID2')
+
+## Distinct
+pair_distances_dt_p <- pair_distances_dt %>% 
+  distinct(group, timegroup, distance) %>% 
+  left_join(tags_p %>% 
+              select(group,
+                     section) %>% 
+              distinct(group, section, .keep_all = T)) %>% 
+  left_join(tracks_dt %>% 
+              select(group,
+                     timegroup,
+                     dt) %>% 
+              distinct())
+
+## For each group, what is the proportion of fixes that are within X meters
+pair_dist_sum <- pair_distances_dt_p %>% 
+  group_by(group, section) %>% 
+  summarise(tot = n(),
+            together = sum(distance < 120),
+            prop = round(together/tot,2),
+            median = round(median(distance))) %>% 
+  arrange(desc(prop))
+
+## Change group order
+pair_distances_dt_p$section <- factor(pair_distances_dt_p$section,
+                                      levels = rev(unique(pair_dist_sum$section)))
+
+
+## Get distance between simultaneous fixes for birds in the same section
+section_distances_dt <- edge_dist(tracks_dt,
+                                  threshold = 2000,
+                                  id = "tag",
+                                  timegroup = "timegroup",
+                                  coords = c("x","y"),
+                                  fillNA = FALSE,
+                                  returnDist = TRUE,
+                                  splitBy = c("section"))
+
+## Reorder IDs
+dyad_id(section_distances_dt, id1 = 'ID1', id2 = 'ID2')
+
+## Add group information and exclude pairs
+section_distances_dt_p <- section_distances_dt %>% 
+  left_join(tags_p %>% 
+              select(ind = tag,
+                     ind_group = group,
+                     ind_section = section),
+            by = c("ID1" = "ind")) %>% 
+  left_join(tags_p %>% 
+              select(partner = tag,
+                     partner_group = group,
+                     partner_section = section), 
+            by = c("ID2" = "partner")) %>% 
+  mutate(same_group = ifelse(ind_group == partner_group & ind_group != "solo", "yes","no"),
+         same_section = ifelse(ind_section == partner_section, "yes", "no")) %>% 
+  filter(same_group == "no") %>% 
+  filter(partner_group != "solo" ) %>%  
+  distinct(section,ind_group, timegroup, dyadID, distance) %>% 
+  select(group = ind_group,
+         section,
+         distance) %>% 
+  arrange(group) %>% 
+  group_by(section) %>% 
+  tidyr::expand(group, distance)
+
+## Median distances
+median(pair_distances_dt_p$distance)
+median(section_distances_dt_p$distance)
+
+
+## Set group levels
+pair_distances_dt_p_index <- pair_distances_dt_p %>% 
+  group_by(group) %>% 
+  mutate(median = median(distance)) %>% 
+  arrange(median) %>% 
+  group_by(median) %>% 
+  mutate(num = cur_group_id()) %>% 
+  ungroup() %>% 
+  mutate(num_f = factor(as.character(num),levels = unique(num), ordered =T))
+
+## Expand distances between neighbors
+section_distances_dt_p_expand <- pair_distances_dt_p_index %>% 
+  distinct(group, section,num_f) %>% 
+  select(-group) %>% 
+  left_join(section_distances_dt_p,by="section") 
+
+
+ggplot() + 
+  ggridges::geom_density_ridges(alpha = .6,
+                                point_alpha = 0.3,
+                                height = 1,
+                                scale = 0.9,
+                                data = pair_distances_dt_p_index,
+                                quantile_lines = TRUE, quantiles = 2,
+                                aes(x = distance, 
+                                    y = num_f, 
+                                    fill = as.character(group))) +
+  
+  ggridges::geom_density_ridges(alpha = 0.1,
+                                # point_alpha = 0.3,
+                                linetype = 2,
+                                scale = 0.9,
+                                color = grey(0.5),
+                                height = 1,
+                                data = section_distances_dt_p_expand,
+                                quantile_lines = TRUE, quantiles = 2,
+                                aes(x = distance, y = num_f)) +
+  scale_x_continuous(limits = c(0, 1000),
+                     expand = expansion(mult = c(0.01,0.03))) +
+  scale_fill_manual(breaks = as.character(color_df$group),
+                    values = color_df$color,
+                    guide = "none") +
+  labs(x = "Distance between individuals (m)",
+       y = NULL) +
+  theme_classic(base_size = 14) +
+  facet_grid(paste("Site ", section)~.,scales="free",switch = "y") +
+  theme(legend.position = "none",text = element_text(size = 28),
+        axis.ticks.y = element_blank(),
+        axis.line.y = element_blank(),
+        axis.text.y = element_blank()) +
+  scale_y_discrete(expand = c(0, 0))
+
+ggsave("./plots/ridge_plot.jpg",
+       width = 7,
+       height = 7, 
+       dpi=500,
+       scale = 2)
 
 ## Home range overlap #######
 
@@ -146,9 +311,7 @@ overlap_df_p <- overlap_df %>%
   ## Keep neighboring birds to compare 
   filter(same_section == "yes")
 
-mean(overlap_df_p[overlap_df_p$same_group == "Breeding pair",]$est)
 median(overlap_df_p[overlap_df_p$same_group == "Breeding pair",]$est)
-
 median(overlap_df_p[overlap_df_p$same_group == "Neighbor",]$est)
 
 ## beta regression of BC values for breeding pairs
@@ -228,18 +391,7 @@ hr_data <- overlap_df_p %>%
     guides(shape = guide_legend(override.aes = list(size = 4))) +
     labs(x = NULL, y = "Home range overlap"))
 
-
-ggsave("/Users/tyson/Documents/academia/institutions/WUR/presentations/BHE/Jan2024/overlap_comparison.jpg",
-       width = 7,
-       height = 7, 
-       dpi=500,
-       scale = 2)
-
 ## Plot home ranges #########
-
-## Get grid points
-gps <- sf::st_read("/Users/tyson/Documents/git/zebby_movement_analysis/data/grid_points.GPX") %>% 
-  select(geometry)
 
 ## Read in tag log
 tags <- readr::read_csv("./data/tag_data.csv", show_col_types = FALSE)
@@ -300,28 +452,21 @@ enc_secs_polys <- mapedit:::combine_list_of_sf(enc_secs) %>%
 keep <- seq(2,nrow(enc_secs_polys),by=3)
 enc_secs_polys <- enc_secs_polys[keep,]
 
-## Get single map of FG
-fg_maps <- ggmap::get_map(location = as.numeric(sf::st_centroid(hr_polys_j) %>%
-                                                  ungroup() %>% 
-                                                  # filter(section == x) %>%
-                                                  sf::st_coordinates() %>%
-                                                  data.frame() %>%
-                                                  summarise(mean_x = mean(X),
-                                                            mean_y = mean(Y))),
-                          maptype = "satellite",
-                          zoom = 16)
-
 ## Get separate maps of FG
 centers <- list(c(141.771, -30.949135),
                 c(141.77, -30.94914),
                 c(141.768, -30.950))
 
-fg_maps <- map2(.x = list(16,16,15),
-                .y = centers,
-                .f = function(x,y)
-                  ggmap::get_map(location = y,
-                                 maptype = "satellite",
-                                 zoom = x))
+# fg_maps <- map2(.x = list(16,16,15),
+#                 .y = centers,
+#                 .f = function(x,y)
+#                   ggmap::get_map(location = y,
+#                                  maptype = "satellite",
+#                                  zoom = x))
+
+# saveRDS(fg_maps, "./data/fg_maps.RDS")
+
+fg_maps <- readRDS("./data/fg_maps.RDS")
 
 ## Read in nest coords
 nest_coords <- sf::read_sf("./data/nest_boxes_and_polygon.GPX") %>% 
@@ -390,19 +535,6 @@ ggsave("./plots/groups_hrs.jpg",
        dpi=500,
        scale = 2)
 
-## Presentation HR plots
-plot_list <- list()
-plot_list[[1]] <- hr_overlap_maps[[2]]
-plot_list[[2]] <- hr_overlap_maps[[3]]
-plot_list[[3]] <- hr_overlap_maps[[1]]
-patchwork::wrap_plots(plot_list, 3,1,
-                      guides = "keep")
-
-ggsave("/Users/tyson/Documents/academia/institutions/WUR/presentations/BHE/Jan2024/hrs.jpg",
-       width = 7,
-       height = 7, 
-       dpi=500,
-       scale = 2)
 
 ## Proximity analysis #########
 
@@ -523,20 +655,6 @@ anova(prox_mod,prox_mod_null2)
          y = "Proximity estimate") +
     facet_grid(~paste("Site", ind_section)))
 
-ggsave("/Users/tyson/Documents/academia/conferences/Ethology/2024/prox_est.jpg",
-       width = 7,
-       height = 7, 
-       dpi=500,
-       scale = 1.2)
-
-
-ggsave("/Users/tyson/Documents/academia/institutions/WUR/presentations/BHE/Jan2024/proximity estimate.jpg",
-       width = 7,
-       height = 7, 
-       dpi=500,
-       scale = 2)
-
-
 ## Distance visulalization ######
 
 ## Groups
@@ -623,11 +741,13 @@ k.check(hgam)
 ## Summary
 summary(hgam)
 
+## Plot
 (dist_plot <- ggplot() +
     stat_smooth(aes(x=t_ss/60,
                     y=obs_est,
                     group=ind_tag,
                     color=as.character(ind_group)),
+                method = 'gam',
                 data = dist_ss %>% 
                   filter(same_group == "Breeding pair")) +
     stat_smooth(aes(x=t_ss/60,
@@ -635,6 +755,7 @@ summary(hgam)
                     group = same_group,
                     linetype = same_group),
                 color = "black",
+                method = 'gam',
                 linewidth = 2,
                 data=dist_ss) +
     facet_grid(paste("Site", ind_section)~.) +
@@ -658,229 +779,3 @@ ggsave("./plots/proximity_plot.jpg",
        height = 7, 
        dpi=500,
        scale = 2)
-
-
-
-## Median distance between pairs and ridge plots of distance between pairs and neighbors #####
-
-## Read in tag log
-tags_p <- readr::read_csv("./data/tag_data.csv", show_col_types = FALSE)
-
-## Get tracks
-tracks <- readRDS("./data/detections/pair_detections.RDS")
-
-## Combine
-tracks_df <- lapply(tracks, function(x) x %>%
-                      data.frame(tag = gsub("tag_","", x@info$identity))) %>%
-  do.call(rbind, .) %>%
-  data.frame() %>%
-  sf::st_as_sf(coords = c("longitude", "latitude"), crs = 4326) %>%
-  sf::st_transform(32754) %>% 
-  dplyr::select(tag,dt=timestamp) %>% 
-  dplyr::arrange(dt) %>% 
-  mutate(x = as.matrix((sf::st_coordinates(.data$geometry)), ncol = 2)[,1],
-         y = as.matrix((sf::st_coordinates(.data$geometry)), ncol = 2)[,2]) %>% 
-  sf::st_drop_geometry()
-
-## Add group information
-pair_tracks <- tracks_df %>%
-  left_join(tags_p) %>%
-  na.omit() %>%
-  ungroup() %>%
-  select(x,
-         y,
-         dt,
-         tag,
-         group,
-         section,
-         sex) %>%
-  arrange(tag,
-          dt) %>%
-  data.frame()
-
-
-# ## Use same time periods for each pair
-# pair_time_filter <- pair_tracks %>% 
-#   group_by(group, tag) %>% 
-#   summarise(min_date = min(dt),
-#             max_date = max(dt)) %>% 
-#   group_by(group) %>% 
-#   summarise(min_date = max(min_date),
-#             max_date = min(max_date),
-#             duration = max_date-min_date)
-# 
-# ## Join and filter by dates
-# pair_tracks <- pair_tracks %>% 
-#   left_join(pair_time_filter) %>% 
-#   filter(dt < max_date & dt > min_date)
-
-## Convert to dt
-tracks_dt <- data.table::setDT(pair_tracks)
-
-## Group times - simultaneous fixes
-group_times(tracks_dt, 
-            datetime = 'dt')
-
-## Get distance between simultaneous fixes for pairs
-pair_distances_dt <- edge_dist(tracks_dt,
-                               threshold = 2000,
-                               id = "tag",
-                               timegroup = "timegroup",
-                               coords = c("x","y"),
-                               fillNA = FALSE,
-                               returnDist = TRUE,
-                               splitBy = c("group"))
-
-## Rearrange IDs
-dyad_id(pair_distances_dt, id1 = 'ID1', id2 = 'ID2')
-
-## Distinct
-pair_distances_dt_p <- pair_distances_dt %>% 
-  distinct(group, timegroup, distance) %>% 
-  left_join(tags_p %>% 
-              select(group,
-                     section) %>% 
-              distinct(group, section, .keep_all = T)) %>% 
-  left_join(tracks_dt %>% 
-              select(group,
-                     timegroup,
-                     dt) %>% 
-              distinct())
-
-## For each group, what is the proportion of fixes that are within X meters
-pair_dist_sum <- pair_distances_dt_p %>% 
-  group_by(group, section) %>% 
-  summarise(tot = n(),
-            together = sum(distance < 120),
-            prop = round(together/tot,2),
-            median = round(median(distance))) %>% 
-  arrange(desc(prop))
-
-## Change group order
-pair_distances_dt_p$section <- factor(pair_distances_dt_p$section,
-                                      levels = rev(unique(pair_dist_sum$section)))
-
-
-## Get distance between simultaneous fixes for birds in the same section
-section_distances_dt <- edge_dist(tracks_dt,
-                                  threshold = 2000,
-                                  id = "tag",
-                                  timegroup = "timegroup",
-                                  coords = c("x","y"),
-                                  fillNA = FALSE,
-                                  returnDist = TRUE,
-                                  splitBy = c("section"))
-
-dyad_id(section_distances_dt, id1 = 'ID1', id2 = 'ID2')
-
-## Add group information and exclude pairs
-section_distances_dt_p <- section_distances_dt %>% 
-  left_join(tags_p %>% 
-              select(ind = tag,
-                     ind_group = group,
-                     ind_section = section),
-            by = c("ID1" = "ind")) %>% 
-  left_join(tags_p %>% 
-              select(partner = tag,
-                     partner_group = group,
-                     partner_section = section), 
-            by = c("ID2" = "partner")) %>% 
-  mutate(same_group = ifelse(ind_group == partner_group & ind_group != "solo", "yes","no"),
-         same_section = ifelse(ind_section == partner_section, "yes", "no")) %>% 
-  filter(same_group == "no") %>% 
-  filter(partner_group != "solo" ) %>%  
-  distinct(section,ind_group, timegroup, dyadID, distance) %>% 
-  select(group = ind_group,
-         section,
-         distance) %>% 
-  arrange(group) %>% 
-  group_by(section) %>% 
-  tidyr::expand(group, distance)
-
-## Median distances
-median(pair_distances_dt_p$distance)
-median(section_distances_dt_p$distance)
-
-## Summary by pair
-pair_distances_dt_p_sum <- pair_distances_dt_p %>% 
-  group_by(section, group) %>% 
-  summarise(median = median(distance),
-            dets = n()) %>%
-  mutate(prop = dets/sum(dets),
-         weight_median = ) %>% 
-  arrange(median) 
-
-
-## Time spent together
-# pair_distances_dt_p$group <- as.factor(pair_distances_dt_p$group)
-
-dets_sum <- pair_distances_dt_p %>% 
-  group_by(section, group) %>% 
-  summarise(dets = n()) %>% 
-  mutate(group = as.character(group))
-
-## Set group levels
-pair_distances_dt_p_index <- pair_distances_dt_p %>% 
-  group_by(group) %>% 
-  mutate(median = median(distance)) %>% 
-  arrange(median) %>% 
-  group_by(median) %>% 
-  mutate(num = cur_group_id()) %>% 
-  ungroup() %>% 
-  mutate(num_f = factor(as.character(num),levels = unique(num), ordered =T))
-
-## Expand distances between neighbors
-section_distances_dt_p_expand <- pair_distances_dt_p_index %>% 
-  distinct(group, section,num_f) %>% 
-  select(-group) %>% 
-  left_join(section_distances_dt_p,by="section") 
-  
-
-ggplot() + 
-  ggridges::geom_density_ridges(alpha = .6,
-                                point_alpha = 0.3,
-                                height = 1,
-                                scale = 0.9,
-                                data = pair_distances_dt_p_index,
-                                quantile_lines = TRUE, quantiles = 2,
-                                aes(x = distance, 
-                                    y = num_f, 
-                                    fill = as.character(group))) +
-  
-  ggridges::geom_density_ridges(alpha = 0.1,
-                                # point_alpha = 0.3,
-                                linetype = 2,
-                                scale = 0.9,
-                                color = grey(0.5),
-                                height = 1,
-                                data = section_distances_dt_p_expand,
-                                quantile_lines = TRUE, quantiles = 2,
-                                aes(x = distance, y = num_f)) +
-  scale_x_continuous(limits = c(0, 1000),
-                     expand = expansion(mult = c(0.01,0.03))) +
-  scale_fill_manual(breaks = as.character(color_df$group),
-                    values = color_df$color,
-                    guide = "none") +
-  # geom_text(aes(x = 1000,
-  #               y = group,
-  #               label = dets),
-  #           position=position_nudge(y=0.5),
-  #           size = 5,
-  #           data = dets_sum) +
-  labs(x = "Distance between individuals (m)",
-       y = NULL) +
-  theme_classic(base_size = 14) +
-  facet_grid(paste("Site ", section)~.,scales="free",switch = "y") +
-  theme(legend.position = "none",text = element_text(size = 28),
-        axis.ticks.y = element_blank(),
-        axis.line.y = element_blank(),
-        axis.text.y = element_blank()) +
-  scale_y_discrete(expand = c(0, 0))
-
-ggsave("./plots/ridge_plot.jpg",
-       width = 7,
-       height = 7, 
-       dpi=500,
-       scale = 2)
-
-
