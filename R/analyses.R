@@ -15,9 +15,6 @@ library(mgcv)
 library(sf)
 library(spatsoc)
 
-# ## Read in map
-# fg_map <- readRDS("./data/fg_map.RDS")
-
 # ## Need to supply an Google map API key to create the maps
 # source("google_key.R")
 # ggmap::register_google(key = google_key)  
