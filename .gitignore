@@ -9,7 +9,7 @@
 /data/
 
 ## Ignore files in output folder
-/output/
+/outputs/
 
 # Session Data files
 .RData
