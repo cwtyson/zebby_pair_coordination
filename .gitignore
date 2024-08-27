@@ -30,6 +30,9 @@
 # Output files from R CMD check
 /*.Rcheck/
 
+# Process data file
+/R/data_process.R
+
 # RStudio files
 .Rproj.user/
 
