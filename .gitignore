@@ -31,7 +31,7 @@
 /*.Rcheck/
 
 # Process data file
-/R/data_process.R
+/R/process_data.R
 
 # RStudio files
 .Rproj.user/
