@@ -1,6 +1,7 @@
 ## Script to process various 'raw' datasets for use in the analysis
 library(tidyverse)
 
+
 ## Process tag data ###########
 
 ## Tag data from field 
@@ -84,3 +85,19 @@ tags_J <- tags_p %>%
 
 ## Save
 saveRDS(pair_akdes,"./data/pair_akdes.RDS")
+
+
+## Process tracks #############
+
+## Tracks from 2022 with 1 incorrect pair (8)
+pair_tracks_2022 <- read_rds("./data/detections/pair_detections.RDS")
+
+## Tags
+tags_p <- read_csv("./data/pair_tags.csv") %>% 
+  filter(year == "2022")
+
+## Keep pairs tags from 2022
+pair_tracks_2022_f <- pair_tracks_2022[names(pair_tracks_2022) %in% tags_p$tag]
+
+## Save
+saveRDS(pair_tracks_2022_f, "./data/detections/pair_tracks_2022.RDS")

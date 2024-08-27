@@ -18,6 +18,9 @@
 # User-specific files
 .Ruserdata
 
+# Remove compressed files
+*.zip
+
 # Example code in package build process
 *-Ex.R
 
